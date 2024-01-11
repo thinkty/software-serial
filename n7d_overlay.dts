@@ -1,0 +1,32 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "brcm,bcm2837";
+
+    /* Pin declaration for the GPIO controller */
+    fragment@0 {
+        target = <&gpio>;
+        __overlay__ {
+            n7d_gpio: n7d_gpio {
+                brcm,pins = <0x1b>;      /* Pin 27 */
+                brcm,function = <0x01>;  /* Output */
+            };
+        };
+    };
+
+    /* Device to use the GPIO pin */
+    fragment@1 {
+        target-path = "/";
+        __overlay__ {
+            n7d: n7d {
+                compatible = "thinkty,n7d";
+                status = "okay";
+                exists;
+                pinctrl-names = "default";  /* Pin reserve */
+                pinctrl-0 = <&n7d_gpio>;
+                serial-gpios = <&gpio 27 0>;
+            };
+        };
+    };
+};
