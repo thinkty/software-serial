@@ -3,9 +3,12 @@
 KERNEL_SRC ?= /lib/modules/$(shell uname -r)/build
 MODULE_SRC := $(shell pwd)
 
-DT_OVERLAY := n7d_overlay
+DT_OVERLAY := overlay
 
-default: dt
+all: dt
+	$(MAKE) -C $(KERNEL_SRC) M=$(MODULE_SRC) modules
+
+module:
 	$(MAKE) -C $(KERNEL_SRC) M=$(MODULE_SRC) modules
 
 dt: $(DT_OVERLAY).dts
@@ -18,4 +21,4 @@ clean:
 	$(MAKE) -C $(KERNEL_SRC) M=$(MODULE_SRC) clean
 	rm -f $(DT_OVERLAY).dtbo
 
-.PHONY: default clean
+.PHONY: all module dt modules_install clean

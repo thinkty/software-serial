@@ -1,5 +1,5 @@
-MODULE := n7d
-OBJECTS := n7d_main.o
+MODULE := soft-serial
+OBJECTS := main.o
 
 obj-m += $(MODULE).o
 $(MODULE)-y := $(OBJECTS)
