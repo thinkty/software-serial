@@ -1,0 +1,32 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "brcm,bcm2837";
+
+    /* Pin declaration for the GPIO controller */
+    fragment@0 {
+        target = <&gpio>;
+        __overlay__ {
+            soft_serial_gpio: soft_serial_gpio {
+                brcm,pins = <0x1b>, <0x11>;      /* GPIO 27, 17 */
+                brcm,function = <0x01>, <0x00>;  /* Output, Input */
+            };
+        };
+    };
+
+    /* Device to use the GPIO pin */
+    fragment@1 {
+        target-path = "/";
+        __overlay__ {
+            soft_serial: soft_serial {
+                compatible = "thinkty,soft_serial";
+                status = "okay";
+                exists;
+                pinctrl-names = "default";  /* Pin reserve */
+                pinctrl-0 = <&soft_serial_gpio>;
+                serial-gpios = <&gpio 27 0>, <&gpio 17 0>;
+            };
+        };
+    };
+};
