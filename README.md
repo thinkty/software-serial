@@ -1,8 +1,4 @@
-# N7D Device Driver
-
-<img src="https://thinkty.net/assets/images/2023-11-19-device_driver-1.jpeg" alt="seven-segment-display" width="300"/>
-
-[demo](https://youtu.be/UzsRnAIfb78)
+# Software Serial
 
 Numerical 7-segment display device driver for Linux.
 This repository only contains the code for the Raspberry Pi.
