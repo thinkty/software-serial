@@ -1,0 +1,17 @@
+# vscode configurations
+.vscode
+compile_commands.json
+.clangd
+.cache/
+
+# Intermediate outputs
+*.cmd
+*.o
+*.mod
+*.mod.c
+*.ko
+*.symvers
+*.order 
+
+# Device tree output
+*.dtbo
