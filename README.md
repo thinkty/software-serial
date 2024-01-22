@@ -1,6 +1,6 @@
 # Software Serial
 
-A software approach to serial communication using Linux (specifically [Raspbian](https://www.raspberrypi.com/software/) w/ (Device Tree)[https://www.raspberrypi.com/documentation/computers/configuration.html#device-trees-overlays-and-parameters]).
+A software approach to serial communication using Linux (specifically [Raspbian](https://www.raspberrypi.com/software/) w/ [Device Tree](https://www.raspberrypi.com/documentation/computers/configuration.html#device-trees-overlays-and-parameters)).
 The code is based on [n7d-lkm](https://github.com/thinkty/n7d-lkm) which is a 7-segment display device driver for Linux.
 
 ## Requirements
