@@ -1,9 +1,7 @@
 # Software Serial
 
-Numerical 7-segment display device driver for Linux.
-This repository only contains the code for the Raspberry Pi.
-The RPi only sends the digits and commands via serial to a microcontroller and the mcu just displays the bytes.
-Although the display can be directly connected to the RPi or use a latch or some shift registers, I just wanted to try [bit-banging](https://en.wikipedia.org/wiki/Bit_banging) using kernel timers. The kernel module consists of the upper half which handles user I/O, and the lower half which handles bit transmission via hrtimer. A detailed overview is on my [blog](https://thinkty.net/projects/2023/11/19/n7d_device_driver.html).
+A software approach to serial communication using Linux (specifically [Raspbian](https://www.raspberrypi.com/software/) w/ (Device Tree)[https://www.raspberrypi.com/documentation/computers/configuration.html#device-trees-overlays-and-parameters]).
+The code is based on [n7d-lkm](https://github.com/thinkty/n7d-lkm) which is a 7-segment display device driver for Linux.
 
 ## Requirements
 - **kernel headers** : the kernel headers are needed to compile a kernel module. The version to download will depend on your (target) kernel version.
@@ -13,7 +11,7 @@ Although the display can be directly connected to the RPi or use a latch or some
 Clone the repository, run `make` to compile the device tree overlay and the kernel module.
 
 ### Device Tree Overlay
-This kernel module uses the GPIO pins specified in the fragments in the overlay [`n7d_overlay.dts`](https://github.com/thinkty/n7d-lkm/blob/main/n7d_overlay.dts).
+This kernel module uses the GPIO pins specified in the fragments in the overlay [`overlay.dts`](https://github.com/thinkty/software-serial/blob/main/overlay.dts).
 Therefore, the overlay must be compiled, and put into the `/boot/firmware/overlays/` directory for it to be accessible on boot.
 To apply the overlay, it must be specified in `/boot/config.txt`.
 For example,
@@ -31,17 +29,20 @@ echo "dtoverlay=$(DT_OVERLAY)" >> /boot/config.txt
 ### Kernel Module
 To install the kernel module, run :
 ```
-insmod n7d.ko
+insmod TODO:.ko
 ```
+
 `sudo` or some access may be needed due to permission.
 `modprobe` may be used instead of `insmod` but there are no other dependencies for this module.
 The baudrate (default 38400) for the serial communication can be specified during module installation:
 ```
-insmod n7d.ko n7d_baudrate=19200
+insmod TODO:.ko baudrate=19200
 ```
 
-## Uninstall
-Run `rmmod n7d` to remove the module from the kernel.
+To remove (uninstall) the kernel module, run :
+```
+rmmod TODO:
+```
 
 ## License
 GPL

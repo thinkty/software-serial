@@ -445,5 +445,5 @@ module_platform_driver(software_serial_platform_driver);
 
 MODULE_AUTHOR("Tae Yoon Kim");
 MODULE_LICENSE("GPL v2");
-MODULE_DESCRIPTION("Software serial driver");
+MODULE_DESCRIPTION("Software serial device driver");
 MODULE_VERSION("0:0.1");
