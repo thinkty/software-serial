@@ -3,7 +3,7 @@
 KERNEL_SRC ?= /lib/modules/$(shell uname -r)/build
 MODULE_SRC := $(shell pwd)
 
-DT_OVERLAY := overlay
+DT_OVERLAY := soft-serial
 
 all: dt
 	$(MAKE) -C $(KERNEL_SRC) M=$(MODULE_SRC) modules
