@@ -4,4 +4,4 @@ OBJECTS := main.o
 obj-m += $(MODULE).o
 $(MODULE)-y := $(OBJECTS)
 
-ccflags-y += -Wall -Werror -Iinclude
+ccflags-y += -Wall -Werror

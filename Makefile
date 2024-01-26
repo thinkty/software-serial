@@ -3,7 +3,7 @@
 KERNEL_SRC ?= /lib/modules/$(shell uname -r)/build
 MODULE_SRC := $(shell pwd)
 
-DT_OVERLAY := overlay
+DT_OVERLAY := soft-serial
 
 all: dt
 	$(MAKE) -C $(KERNEL_SRC) M=$(MODULE_SRC) modules
@@ -17,8 +17,11 @@ dt: $(DT_OVERLAY).dts
 modules_install:
 	$(MAKE) -C $(KERNEL_SRC) M=$(MODULE_SRC) modules_install
 
+bear:
+	$(MAKE) clean; bear -- make module
+
 clean:
 	$(MAKE) -C $(KERNEL_SRC) M=$(MODULE_SRC) clean
 	rm -f $(DT_OVERLAY).dtbo
 
-.PHONY: all module dt modules_install clean
+.PHONY: all module dt modules_install bear clean
