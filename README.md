@@ -26,22 +26,27 @@ cp $(DT_OVERLAY).dtbo /boot/firmware/overlays/.
 echo "dtoverlay=$(DT_OVERLAY)" >> /boot/config.txt
 ```
 
+After rebooting, check that the device tree has been properly parsed by running
+```
+dtc -I fs /sys/firmware/devicetree/base | less
+```
+
 ### Kernel Module
 To install the kernel module, run :
 ```
-insmod TODO:.ko
+insmod soft-serial.ko
 ```
 
 `sudo` or some access may be needed due to permission.
 `modprobe` may be used instead of `insmod` but there are no other dependencies for this module.
 The baudrate (default 38400) for the serial communication can be specified during module installation:
 ```
-insmod TODO:.ko baudrate=19200
+insmod soft-serial.ko baudrate=19200
 ```
 
 To remove (uninstall) the kernel module, run :
 ```
-rmmod TODO:
+rmmod soft_serial
 ```
 
 ## License

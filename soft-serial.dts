@@ -25,7 +25,7 @@
                 exists;
                 pinctrl-names = "default";  /* Pin reserve */
                 pinctrl-0 = <&soft_serial_gpio>;
-                serial-gpios = <&gpio 27 0>, <&gpio 17 0>;
+                serial-gpios = <&gpio 27 0>, <&gpio 17 1>;
             };
         };
     };

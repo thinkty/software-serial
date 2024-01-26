@@ -312,13 +312,13 @@ static int dt_probe(struct platform_device *pdev)
 
     /* Get the GPIO descriptors from the pin numbers */
     // TODO: rx as well
-    // dd->rx = devm_gpiod_get_index(&pdev->dev, "serial", 0, GPIOD_IN);
+    // dd->rx = devm_gpiod_get_index(&pdev->dev, "serial", 1, GPIOD_IN);
     // if (IS_ERR(dd->rx)) {
     //     err = PTR_ERR(dd->rx);
     //     pr_err(DEVICE_NAME ": devm_gpiod_get(rx) failed\n");
     //     goto DT_PROBE_GPIOD_GET_RX;
     // }
-    dd->tx = devm_gpiod_get_index(&pdev->dev, "serial", 1, GPIOD_OUT_HIGH);
+    dd->tx = devm_gpiod_get_index(&pdev->dev, "serial", 0, GPIOD_OUT_HIGH);
     if (IS_ERR(dd->tx)) {
         err = PTR_ERR(dd->tx);
         pr_err(DEVICE_NAME ": devm_gpiod_get(tx) failed\n");
