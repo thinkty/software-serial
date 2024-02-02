@@ -4,12 +4,14 @@
  * 
  */
 
+#include "linux/irqreturn.h"
 #include <linux/device.h>
 #include <linux/err.h>
 #include <linux/fs.h>
 #include <linux/gpio/consumer.h>
 #include <linux/hrtimer.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/kfifo.h>
 #include <linux/kobject.h>
@@ -50,6 +52,8 @@
  * @param byte Current byte to be transmitted via serial
  * @param writer_waitq Queue for writers when tx buffer is full
  *
+ * @param rx_irq IRQ number for getting the interrupts of RX line 
+ *
  * @param closing Flag to stop work from self-queueing to workqueue
  * @param miscdev Used for getting drvdata using container_of
  * @param tx GPIO descriptor for transmission
@@ -70,6 +74,8 @@ struct drvdata {
     unsigned int tx_byte;
     wait_queue_head_t writer_waitq;
 
+    int rx_irq;
+
     bool closing;
     struct miscdevice miscdev;
     struct gpio_desc * tx;
@@ -78,9 +84,9 @@ struct drvdata {
     ktime_t delay;
 };
 
-static int baudrate = 115200;
+static int baudrate = 38400;
 module_param(baudrate, int, 0);
-MODULE_PARM_DESC(baudrate, "\tBaudrate of the device (default=115200)");
+MODULE_PARM_DESC(baudrate, "\tBaudrate of the device (default=38400)");
 
 /**
  * Function prototypes for file operations
@@ -279,6 +285,22 @@ static void tx_work_func(struct work_struct * work)
 }
 
 /**
+ * @brief Interrupt service routine for the RX line interrupts. TODO:
+ *
+ * @param irq 
+ * @param data 
+ *
+ * @returns IRQ_HANDLED. 
+ */
+static irqreturn_t rx_isr(int irq, void * data)
+{
+    struct platform_device * pdev = (struct platform_device *) data;
+    struct drvdata * dd = (struct drvdata *) dev_get_drvdata(&pdev->dev);
+    pr_info(DEVICE_NAME ": interrupted on irq=%d (saved irq=%d)\n", irq,  dd->rx_irq);
+    return IRQ_HANDLED;
+}
+
+/**
  * @brief Initialize the device by allocating its numbers (major, minor),
  * create a misc (single character) device, and initialize the driver data.
  * 
@@ -288,7 +310,7 @@ static void tx_work_func(struct work_struct * work)
  */
 static int dt_probe(struct platform_device *pdev)
 {
-    int err = 0;
+    int ret = 0;
     struct drvdata * dd = NULL;
 
     /* Check that the device exists before attaching device driver */
@@ -303,10 +325,11 @@ static int dt_probe(struct platform_device *pdev)
         pr_err(DEVICE_NAME ": kzalloc() failed\n");
         return -ENOMEM;
     }
+    dev_set_drvdata(&pdev->dev, dd);
 
     /* TODO: Allocate tx & rx fifos */
-    err = kfifo_alloc(&dd->tx_fifo, DEVICE_FIFO_SIZE, GFP_KERNEL);
-    if (err != 0) {
+    ret = kfifo_alloc(&dd->tx_fifo, DEVICE_FIFO_SIZE, GFP_KERNEL);
+    if (ret != 0) {
         pr_err(DEVICE_NAME ": kfifo_alloc() failed\n");
         goto DT_PROBE_KFIFO_ALLOC;
     }
@@ -321,7 +344,7 @@ static int dt_probe(struct platform_device *pdev)
     // }
     dd->tx = devm_gpiod_get_index(&pdev->dev, "serial", 0, GPIOD_OUT_HIGH);
     if (IS_ERR(dd->tx)) {
-        err = PTR_ERR(dd->tx);
+        ret = PTR_ERR(dd->tx);
         pr_err(DEVICE_NAME ": devm_gpiod_get(tx) failed\n");
         goto DT_PROBE_GPIOD_GET_TX;
     }
@@ -338,19 +361,8 @@ static int dt_probe(struct platform_device *pdev)
     dd->workqueue = alloc_ordered_workqueue(DEVICE_WORKQUEUE, 0);
     if (!dd->workqueue) {
         pr_err(DEVICE_NAME ": alloc_ordered_workqueue(tx) failed\n");
-        err = -ENOMEM; /* However, there are multiple reasons to fail */
+        ret = -ENOMEM; /* However, there are multiple reasons to fail */
         goto DT_PROBE_ALLOC_WQ_TX;
-    }
-
-    /* Make the device available to the kernel & user */
-    dd->miscdev.minor = MISC_DYNAMIC_MINOR;
-    dd->miscdev.name = DEVICE_NAME;
-    dd->miscdev.fops = &fops;
-    dd->miscdev.mode = S_IRUGO | S_IWUGO;
-    err = misc_register(&dd->miscdev);
-    if (err < 0) {
-        pr_err(DEVICE_NAME ": misc_register() failed\n");
-        goto DT_PROBE_MISC_REG;
     }
 
     /* As the device is ready, queue work to start handling data if available */
@@ -366,20 +378,49 @@ static int dt_probe(struct platform_device *pdev)
     dd->tx_timer.function = tx_timer_callback;
     hrtimer_start(&dd->tx_timer, dd->delay, HRTIMER_MODE_REL);
 
-    /* Set the driver data to the device */
-    dev_set_drvdata(&pdev->dev, dd);
+    /* Get IRQ from platform device (device tree) and request IRQ */
+    dd->rx_irq = platform_get_irq(pdev, 0);
+    if (dd->rx_irq < 0) {
+        ret = -ENODATA;
+        pr_err(DEVICE_NAME ": platform_get_irq() failed\n");
+        goto DT_PROBE_REQUEST_IRQ;
+    }
+    ret = devm_request_irq(&pdev->dev, dd->rx_irq, rx_isr, IRQF_TRIGGER_NONE, dev_name(&pdev->dev), pdev);
+    if (ret < 0) {
+        pr_err(DEVICE_NAME ": devm_request_irq() failed\n");
+        goto DT_PROBE_REQUEST_IRQ;
+    }
+
+    /* Make the device available to the kernel & user */
+    dd->miscdev.minor = MISC_DYNAMIC_MINOR;
+    dd->miscdev.name = DEVICE_NAME;
+    dd->miscdev.fops = &fops;
+    dd->miscdev.mode = S_IRUGO | S_IWUGO;
+    ret = misc_register(&dd->miscdev);
+    if (ret < 0) {
+        pr_err(DEVICE_NAME ": misc_register() failed\n");
+        goto DT_PROBE_MISC_REG;
+    }
 
     pr_info(DEVICE_NAME ": successful init with baudrate=%d", baudrate);
     return 0;
 
 DT_PROBE_MISC_REG:
+DT_PROBE_REQUEST_IRQ:
+    hrtimer_cancel(&dd->tx_timer);
+    dd->closing = true;
+    wake_up_interruptible(&dd->writer_waitq);
+    wake_up_interruptible(&dd->tx_work_waitqueue);
+    misc_deregister(&dd->miscdev);
+    cancel_work_sync(&dd->tx_work);
+    flush_workqueue(dd->workqueue);
     destroy_workqueue(dd->workqueue);
 DT_PROBE_ALLOC_WQ_TX:
     mutex_destroy(&dd->tx_fifo_mutex);
 DT_PROBE_GPIOD_GET_TX:
     kfifo_free(&dd->tx_fifo);
 DT_PROBE_KFIFO_ALLOC:
-    return err;
+    return ret;
 }
 
 /**
@@ -389,31 +430,31 @@ DT_PROBE_KFIFO_ALLOC:
  */
 static int dt_remove(struct platform_device *pdev)
 {
-    struct drvdata * drv = dev_get_drvdata(&pdev->dev);
-    if (!drv) {
+    struct drvdata * dd = dev_get_drvdata(&pdev->dev);
+    if (!dd) {
         pr_err(DEVICE_NAME ": driver data does not exist\n");
         return -ENODATA;
     }
 
+    /* Unregister misc device */
+    misc_deregister(&dd->miscdev);
+
     /* Stop the bit-bang tx timer */
-    hrtimer_cancel(&drv->tx_timer);
+    hrtimer_cancel(&dd->tx_timer);
 
     /* Mark as closing so new work will not be added. */
-    drv->closing = true;
-    wake_up_interruptible(&drv->writer_waitq);
-    wake_up_interruptible(&drv->tx_work_waitqueue);
-
-    /* Unregister misc device */
-    misc_deregister(&drv->miscdev);
+    dd->closing = true;
+    wake_up_interruptible(&dd->writer_waitq);
+    wake_up_interruptible(&dd->tx_work_waitqueue);
 
     /* Cancel the remaining work, and wait for any remaining work */
-    cancel_work_sync(&drv->tx_work);
-    flush_workqueue(drv->workqueue); /* Just in case */
-    destroy_workqueue(drv->workqueue);
+    cancel_work_sync(&dd->tx_work);
+    flush_workqueue(dd->workqueue); /* Just in case */
+    destroy_workqueue(dd->workqueue);
 
     /* Cleanup driver data */
-    mutex_destroy(&drv->tx_fifo_mutex);
-    kfifo_free(&drv->tx_fifo);
+    mutex_destroy(&dd->tx_fifo_mutex);
+    kfifo_free(&dd->tx_fifo);
 
     pr_info(DEVICE_NAME ": exit\n");
     return 0;
@@ -431,7 +472,7 @@ MODULE_DEVICE_TABLE(of, dt_ids);
 /**
  * N7D platform device operations given as function pointers
  */
-static struct platform_driver software_serial_platform_driver = {
+static struct platform_driver soft_serial_platform_driver = {
     .probe = dt_probe,
     .remove = dt_remove,
     .driver = {
@@ -442,7 +483,7 @@ static struct platform_driver software_serial_platform_driver = {
 };
 
 /* Macro for module init and exit */
-module_platform_driver(software_serial_platform_driver);
+module_platform_driver(soft_serial_platform_driver);
 
 MODULE_AUTHOR("Tae Yoon Kim");
 MODULE_LICENSE("GPL v2");
