@@ -30,13 +30,13 @@
 #define START_BIT         (0)
 #define STOP_BIT          (1)
 
-#define DEVICE_NAME       "soft-serial"
-#define DEVICE_WORKQUEUE  "soft-serial-workqueue"
+#define DEVICE_NAME       "soft_serial"
+#define DEVICE_WORKQUEUE  "soft_serial-workqueue"
 #define DEVICE_FIFO_SIZE  (8) /* Size of the circular buffer */
 #define DEVICE_TIMEOUT    (100) /* Time (ms) to wait until buffer has space */
 
 /**
- * drvdata - driver data
+ * drvdata - device data
  * 
  * @param workqueue Queue for tx_work and rx_work
  * @param tx_work Work that transmit each byte
@@ -78,9 +78,9 @@ struct drvdata {
     ktime_t delay;
 };
 
-static int baudrate = 38400;
+static int baudrate = 115200;
 module_param(baudrate, int, 0);
-MODULE_PARM_DESC(baudrate, "\tBaudrate of the device (default=38400)");
+MODULE_PARM_DESC(baudrate, "\tBaudrate of the device (default=115200)");
 
 /**
  * Function prototypes for file operations
@@ -94,7 +94,8 @@ static ssize_t write(struct file * filp, const char __user * buf, size_t count, 
  */
 static struct file_operations fops = {
     .owner = THIS_MODULE,
-    .release = release,
+    // TODO: open : request irq if not already done. keep count of open so that irq can be released in last release
+    .release = release, // TODO: release irq if last device (using count of open)
     // TODO: read
     .write = write,
 };
@@ -216,7 +217,7 @@ static enum hrtimer_restart tx_timer_callback(struct hrtimer * timer)
     /* No byte to transmit, repeat timer */
     if (!dd->has_tx_byte) {
         hrtimer_forward_now(&dd->tx_timer, dd->delay);
-        return HRTIMER_RESTART;
+        return HRTIMER_RESTART; // TODO: can we just stop the timer until work turns it back on?
     }
 
     /* Start bit */
