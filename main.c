@@ -34,7 +34,7 @@
 
 #define DEVICE_NAME       "soft_serial"
 #define DEVICE_WORKQUEUE  "soft_serial-workqueue"
-#define DEVICE_FIFO_SIZE  (8) /* Size of the circular buffer */
+#define DEVICE_FIFO_SIZE  (64)  /* Size of the circular buffer */
 #define DEVICE_TIMEOUT    (100) /* Time (ms) to wait until buffer has space */
 
 /**
@@ -80,9 +80,9 @@ struct drvdata {
     ktime_t delay;
 };
 
-static int baudrate = 115200;
+static int baudrate = 38400;
 module_param(baudrate, int, 0);
-MODULE_PARM_DESC(baudrate, "\tBaudrate of the device (default=115200)");
+MODULE_PARM_DESC(baudrate, "\tBaudrate of the device (default=38400)");
 
 /**
  * Function prototypes for file operations
@@ -135,7 +135,10 @@ static int release(struct inode * inode, struct file * filp)
 }
 
 /**
- * @brief Check user input and write to the device buffer.
+ * @brief Write to the device buffer (fifo). Since there can be simultaneous
+ * access to write, a mutex lock is used. If the buffer is full, the write
+ * operation hangs until a wake up is received from the work function. If the
+ * user specified non-blocking, it will return as soon as it is blockde.
  * 
  * @param filp Pointer to the open file for the device
  * @param buf User-space buffer
@@ -200,15 +203,23 @@ static ssize_t write(struct file * filp, const char __user * buf, size_t count, 
     /* Wake up work waitqueue since there are bytes available to transmit */
     wake_up_interruptible(&dd->tx_work_waitqueue);
 
+    // TODO: no need to use work function
+    // /* If the clock isn't waiting or executing handler, start the timer. */
+    // if (!hrtimer_active(&dd->tx_timer)) {
+    //     hrtimer_start(&dd->tx_timer, dd->delay, HRTIMER_MODE_REL);
+    // }
+
     return to_copy;
 }
 
 /**
  * @brief Bottom half of the device driver to process available bytes in the tx
- * fifo buffer. There are two waits in the work function. First wait is for a
- * byte to send, and the second wait is for the timer to be ready to send the
- * next byte. In both waits, it also checks if the device is closing. When the
- * device is closing, it does not self-requeue.  
+ * fifo buffer. There are two waits in the work function. First wait is for the
+ * bytes to send, and the second wait is for the timer to be ready to send the
+ * next bytes. In both waits, it also checks if the device is closing. When the
+ * device is closing, it does not self-requeue.
+ *
+ * TODO: is work function not needed? can we just directly start hrtimer in write? (start if not active as starting removes the timer). As kfifo_in increments in after inserting, timer function does not need to worry about partial insert.
  * 
  * @param work Pointer to the work structure
  */
@@ -232,13 +243,13 @@ static void tx_work_func(struct work_struct * work)
 
     hrtimer_start(&dd->tx_timer, dd->delay, HRTIMER_MODE_REL);
 
-    /* Sleep until the hrtimer has sent the byte */
+    /* Sleep until the hrtimer has sent one or more bytes */
     err = wait_event_interruptible(dd->tx_work_waitqueue, dd->closing || !hrtimer_active(&dd->tx_timer));
     if (err < 0 || dd->closing) {
         return;
     }
 
-    /* Wake up writer_waitq since new space is available */
+    /* Wake up writer_waitq in case it was waiting for space in fifo */
     wake_up_interruptible(&dd->writer_waitq);
 
     /* Self-requeueing work */
@@ -250,7 +261,8 @@ static void tx_work_func(struct work_struct * work)
  * @brief Callback function called by hrtimer to handle bit-banging. Since this
  * function runs in interrupt context, do not sleep or trigger a resched. The
  * timer is stopped after transmitting the last bit. wake_up() and kfifo_get()
- * are safe to call in interrupt context (TODO:).
+ * are safe to call in interrupt context. The function transmits until there are
+ * no bytes left in the fifo.
  * 
  * @param timer The hrtimer that called this callback function
  * 
@@ -265,10 +277,9 @@ static enum hrtimer_restart tx_timer_callback(struct hrtimer * timer)
 
     /* Start bit */
     if (bit == -1) {
-        /* Get the byte to send. If nothing was retrieved, sth went wrong */
+        /* If nothing was retrieved, wake up the work func for more. */
         /* Since there is only 1 actual device to write to, no locks here */
         if (kfifo_get(&dd->tx_fifo, &byte) == 0) {
-            pr_warn(DEVICE_NAME ": kfifo_get(tx_fifo) no bytes available\n");
             wake_up_interruptible(&dd->tx_work_waitqueue);
             return HRTIMER_NORESTART;
         }
@@ -286,10 +297,6 @@ static enum hrtimer_restart tx_timer_callback(struct hrtimer * timer)
         gpiod_set_value(dd->tx_gpio, STOP_BIT);
         bit = -1;
         byte = 0;
-
-        /* Signal to get next byte. Safe to call in atomic context */
-        wake_up_interruptible(&dd->tx_work_waitqueue);
-        return HRTIMER_NORESTART;
     }
 
     /* Restart timer to handle next bit */
