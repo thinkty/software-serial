@@ -38,8 +38,8 @@
 #define DEVICE_TIMEOUT    (100) /* Time (ms) to wait until buffer has space */
 
 /**
- * drvdata - device data
- * 
+ * drvdata - device data TODO: clean up this stuff
+ *
  * @param workqueue Queue for tx_work and rx_work
  * @param tx_work Work that transmit each byte
  * @param tx_work_waitqueue Wait queue for tx_work
@@ -48,17 +48,15 @@
  *
  * @param tx_fifo Circular buffer for storing byte(s) to transmit
  * @param tx_fifo_mutex Mutex for the transmit buffer
- * @param has_tx_byte Whether there is a byte to transmit
- * @param byte Current byte to be transmitted via serial
  * @param writer_waitq Queue for writers when tx buffer is full
  *
  * @param rx_irq IRQ number for getting the interrupts of RX line 
  *
  * @param closing Flag to stop work from self-queueing to workqueue
  * @param miscdev Used for getting drvdata using container_of
- * @param tx GPIO descriptor for transmission
- * @param rx GPIO descriptor for receival
- * @param tx_timer High resolution timer to handle bit-banging TODO: timer -> tx_timer
+ * @param tx_gpio GPIO descriptor for transmission
+ * @param rx_gpio GPIO descriptor for receival
+ * @param tx_timer High resolution timer to handle bit-banging
  * @param delay Nanoseconds before sending the next "bit" (computed by baudrate)
  */
 struct drvdata {
@@ -70,23 +68,21 @@ struct drvdata {
 
     struct kfifo tx_fifo;
     struct mutex tx_fifo_mutex;
-    bool has_tx_byte;
-    unsigned int tx_byte;
     wait_queue_head_t writer_waitq;
 
     int rx_irq;
 
     bool closing;
     struct miscdevice miscdev;
-    struct gpio_desc * tx;
-    struct gpio_desc * rx;
+    struct gpio_desc * tx_gpio;
+    struct gpio_desc * rx_gpio;
     struct hrtimer tx_timer;
     ktime_t delay;
 };
 
-static int baudrate = 38400;
+static int baudrate = 115200;
 module_param(baudrate, int, 0);
-MODULE_PARM_DESC(baudrate, "\tBaudrate of the device (default=38400)");
+MODULE_PARM_DESC(baudrate, "\tBaudrate of the device (default=115200)");
 
 /**
  * Function prototypes for file operations
@@ -118,6 +114,8 @@ static inline struct drvdata * get_drvdata(struct file * filp)
     struct miscdevice * dev = filp->private_data;
     return container_of(dev, struct drvdata, miscdev);
 }
+
+// TODO: open
 
 /**
  * @brief Release is called when the device file descriptor is closed. However,
@@ -206,9 +204,53 @@ static ssize_t write(struct file * filp, const char __user * buf, size_t count, 
 }
 
 /**
+ * @brief Bottom half of the device driver to process available bytes in the tx
+ * fifo buffer. There are two waits in the work function. First wait is for a
+ * byte to send, and the second wait is for the timer to be ready to send the
+ * next byte. In both waits, it also checks if the device is closing. When the
+ * device is closing, it does not self-requeue.  
+ * 
+ * @param work Pointer to the work structure
+ */
+static void tx_work_func(struct work_struct * work)
+{
+    int err;
+    struct drvdata * dd = container_of(work, struct drvdata, tx_work);
+
+    /* Sleep until there is something in tx_fifo or the device is closing */
+    err = wait_event_interruptible(dd->tx_work_waitqueue, dd->closing || !kfifo_is_empty(&dd->tx_fifo));
+    if (err < 0 || dd->closing) {
+        /* If interrupted or device is closing, stop the work */
+        return;
+    }
+
+    /* Sleep until the hrtimer is ready to send or the device is closing */
+    err = wait_event_interruptible(dd->tx_work_waitqueue, dd->closing || !hrtimer_active(&dd->tx_timer));
+    if (err < 0 || dd->closing) {
+        return;
+    }
+
+    hrtimer_start(&dd->tx_timer, dd->delay, HRTIMER_MODE_REL);
+
+    /* Sleep until the hrtimer has sent the byte */
+    err = wait_event_interruptible(dd->tx_work_waitqueue, dd->closing || !hrtimer_active(&dd->tx_timer));
+    if (err < 0 || dd->closing) {
+        return;
+    }
+
+    /* Wake up writer_waitq since new space is available */
+    wake_up_interruptible(&dd->writer_waitq);
+
+    /* Self-requeueing work */
+    queue_work(dd->workqueue, &dd->tx_work);
+    return;
+}
+
+/**
  * @brief Callback function called by hrtimer to handle bit-banging. Since this
- * function runs in atomic context (interrupts disabled), do not sleep or
- * trigger a resched.
+ * function runs in interrupt context, do not sleep or trigger a resched. The
+ * timer is stopped after transmitting the last bit. wake_up() and kfifo_get()
+ * are safe to call in interrupt context (TODO:).
  * 
  * @param timer The hrtimer that called this callback function
  * 
@@ -218,71 +260,44 @@ static ssize_t write(struct file * filp, const char __user * buf, size_t count, 
 static enum hrtimer_restart tx_timer_callback(struct hrtimer * timer)
 {
     static unsigned int bit = -1;
+    static unsigned char byte = 0;
     struct drvdata * dd = container_of(timer, struct drvdata, tx_timer);
-
-    /* No byte to transmit, repeat timer */
-    if (!dd->has_tx_byte) {
-        hrtimer_forward_now(&dd->tx_timer, dd->delay);
-        return HRTIMER_RESTART; // TODO: can we just stop the timer until work turns it back on?
-    }
 
     /* Start bit */
     if (bit == -1) {
-        gpiod_set_value(dd->tx, START_BIT);
+        /* Get the byte to send. If nothing was retrieved, sth went wrong */
+        /* Since there is only 1 actual device to write to, no locks here */
+        if (kfifo_get(&dd->tx_fifo, &byte) == 0) {
+            pr_warn(DEVICE_NAME ": kfifo_get(tx_fifo) no bytes available\n");
+            wake_up_interruptible(&dd->tx_work_waitqueue);
+            return HRTIMER_NORESTART;
+        }
+
+        gpiod_set_value(dd->tx_gpio, START_BIT);
         bit++;
     }
     /* Data bits (8 bits) */
     else if (bit < 8) {
-        gpiod_set_value(dd->tx, (dd->tx_byte & (1 << bit)) >> bit);
+        gpiod_set_value(dd->tx_gpio, (byte & (1 << bit)) >> bit);
         bit++;
     }
     /* Stop bit */
     else {
-        gpiod_set_value(dd->tx, STOP_BIT);
+        gpiod_set_value(dd->tx_gpio, STOP_BIT);
         bit = -1;
-        dd->has_tx_byte = false;
+        byte = 0;
+
         /* Signal to get next byte. Safe to call in atomic context */
         wake_up_interruptible(&dd->tx_work_waitqueue);
+        return HRTIMER_NORESTART;
     }
 
-    /* Restart the timer to handle next bit or byte */
-    hrtimer_forward_now(&dd->tx_timer, dd->delay);
+    /* Restart timer to handle next bit */
+    hrtimer_forward_now(timer, dd->delay);
     return HRTIMER_RESTART;
 }
 
-/**
- * @brief Bottom half of the device driver to process available bytes in the
- * tx fifo buffer
- * 
- * @param work Pointer to the work structure
- */
-static void tx_work_func(struct work_struct * work)
-{
-    int err;
-    struct drvdata * dd = container_of(work, struct drvdata, tx_work);
-
-    /* Sleep until there is something in fifo and the timer is ready to send
-    another byte or the device is closing */
-    err = wait_event_interruptible(dd->tx_work_waitqueue, dd->closing || (!kfifo_is_empty(&dd->tx_fifo) && !dd->has_tx_byte));
-    if (err < 0 || dd->closing) {
-        /* If interrupted or device is closing, stop the work */
-        return;
-    }
-
-    /* Since there is only 1 actual device to write to, no locks here */
-    if (kfifo_get(&dd->tx_fifo, &dd->tx_byte) == 0) {
-        pr_warn(DEVICE_NAME ": kfifo_get(tx_fifo) no bytes available\n");
-        queue_work(dd->workqueue, &dd->tx_work);
-        return;
-    }
-    dd->has_tx_byte = true;
-
-    /* Wake up writer_waitq since new space is available */
-    wake_up_interruptible(&dd->writer_waitq);
-
-    /* Self-requeueing work */
-    queue_work(dd->workqueue, &dd->tx_work);
-}
+// TODO: read
 
 /**
  * @brief Interrupt service routine for the RX line interrupts. TODO:
@@ -342,13 +357,13 @@ static int dt_probe(struct platform_device *pdev)
     //     pr_err(DEVICE_NAME ": devm_gpiod_get(rx) failed\n");
     //     goto DT_PROBE_GPIOD_GET_RX;
     // }
-    dd->tx = devm_gpiod_get_index(&pdev->dev, "serial", 0, GPIOD_OUT_HIGH);
-    if (IS_ERR(dd->tx)) {
-        ret = PTR_ERR(dd->tx);
+    dd->tx_gpio = devm_gpiod_get_index(&pdev->dev, "serial", 0, GPIOD_OUT_HIGH);
+    if (IS_ERR(dd->tx_gpio)) {
+        ret = PTR_ERR(dd->tx_gpio);
         pr_err(DEVICE_NAME ": devm_gpiod_get(tx) failed\n");
         goto DT_PROBE_GPIOD_GET_TX;
     }
-    gpiod_set_value(dd->tx, 1); /* Set as stop bit */
+    gpiod_set_value(dd->tx_gpio, 1); /* Set as stop bit */
 
     /* Initialize various wait queues and fifo mutexes */
     init_waitqueue_head(&dd->tx_work_waitqueue);
@@ -367,16 +382,13 @@ static int dt_probe(struct platform_device *pdev)
 
     /* As the device is ready, queue work to start handling data if available */
     dd->closing = false;
-    dd->has_tx_byte = false;
-    dd->tx_byte = 0;
     INIT_WORK(&dd->tx_work, tx_work_func);
     queue_work(dd->workqueue, &dd->tx_work);
 
-    /* Initialize and start the high resolution timer for TX */
+    /* Initialize the high resolution timer for TX */
     hrtimer_init(&dd->tx_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
     dd->delay = ktime_set(0, NSEC_PER_SEC / baudrate);
     dd->tx_timer.function = tx_timer_callback;
-    hrtimer_start(&dd->tx_timer, dd->delay, HRTIMER_MODE_REL);
 
     /* Get IRQ from platform device (device tree) and request IRQ */
     dd->rx_irq = platform_get_irq(pdev, 0);
