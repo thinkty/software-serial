@@ -14,9 +14,6 @@ module:
 dt: $(DT_OVERLAY).dts
 	dtc -@ -I dts -O dtb -o $(DT_OVERLAY).dtbo $(DT_OVERLAY).dts
 
-modules_install:
-	$(MAKE) -C $(KERNEL_SRC) M=$(MODULE_SRC) modules_install
-
 # For Clangd intellisense
 bear:
 	$(MAKE) clean; bear -- make module
