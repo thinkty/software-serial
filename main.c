@@ -40,9 +40,6 @@
 /**
  * drvdata - device data TODO: clean up this stuff
  *
- * @param workqueue Queue for tx_work and rx_work
- * @param tx_work Work that transmit each byte
- * @param tx_work_waitqueue Wait queue for tx_work
  * @param rx_work Work that receive each byte
  * @param rx_work_waitqueue TODO: not sure if needed yet
  *
@@ -60,9 +57,6 @@
  * @param delay Nanoseconds before sending the next "bit" (computed by baudrate)
  */
 struct drvdata {
-    struct workqueue_struct * workqueue;
-    struct work_struct tx_work;
-    wait_queue_head_t tx_work_waitqueue;
     // struct work_struct rx_work;
     // wait_queue_head_t rx_work_waitqueue;
 
@@ -89,6 +83,7 @@ MODULE_PARM_DESC(baudrate, "\tBaudrate of the device (default=38400)");
  */
 static int release(struct inode * inode, struct file * filp);
 static ssize_t write(struct file * filp, const char __user * buf, size_t count, loff_t * f_pos);
+// TODO:
 
 /**
  * File operations given as function pointers. .open is handled by default and
@@ -136,9 +131,9 @@ static int release(struct inode * inode, struct file * filp)
 
 /**
  * @brief Write to the device buffer (fifo). Since there can be simultaneous
- * access to write, a mutex lock is used. If the buffer is full, the write
- * operation hangs until a wake up is received from the work function. If the
- * user specified non-blocking, it will return as soon as it is blockde.
+ * writes, a mutex lock is used. If the buffer is full, the write operation
+ * blocks until a wake up is received. If the user specified non-blocking, it
+ * will return as soon as it is blocked.
  * 
  * @param filp Pointer to the open file for the device
  * @param buf User-space buffer
@@ -151,14 +146,12 @@ static ssize_t write(struct file * filp, const char __user * buf, size_t count, 
 {
     char tbuf[DEVICE_FIFO_SIZE] = {0};
     size_t to_copy = 0;
-    size_t not_copied = 0;
     int err = 0;
     struct drvdata * dd = get_drvdata(filp);
 
     /* At maximum, the size of buffer */
     to_copy = count < DEVICE_FIFO_SIZE ? count : DEVICE_FIFO_SIZE;
-    not_copied = copy_from_user(tbuf, buf, to_copy);
-    to_copy -= not_copied;
+    to_copy -= copy_from_user(tbuf, buf, to_copy);
 
     /* By being interruptible, when given any signal, the process will just
     give up on acquiring the lock and return -EINTR. */
@@ -180,7 +173,6 @@ static ssize_t write(struct file * filp, const char __user * buf, size_t count, 
         /* Sleep until space available, closing device, interrupt, or timeout */
         err = wait_event_interruptible_hrtimeout(dd->writer_waitq, dd->closing || !kfifo_is_full(&dd->tx_fifo), ms_to_ktime(DEVICE_TIMEOUT));
         if (err < 0) {
-            /* Interrupted or timeout occurred */
             return err;
         }
 
@@ -200,61 +192,12 @@ static ssize_t write(struct file * filp, const char __user * buf, size_t count, 
     to_copy = kfifo_in(&dd->tx_fifo, tbuf, to_copy);
     mutex_unlock(&dd->tx_fifo_mutex);
 
-    /* Wake up work waitqueue since there are bytes available to transmit */
-    wake_up_interruptible(&dd->tx_work_waitqueue);
-
-    // TODO: no need to use work function
-    // /* If the clock isn't waiting or executing handler, start the timer. */
-    // if (!hrtimer_active(&dd->tx_timer)) {
-    //     hrtimer_start(&dd->tx_timer, dd->delay, HRTIMER_MODE_REL);
-    // }
+    /* If the clock isn't waiting or executing handler, start the timer. */
+    if (!hrtimer_active(&dd->tx_timer)) {
+        hrtimer_start(&dd->tx_timer, dd->delay, HRTIMER_MODE_REL);
+    }
 
     return to_copy;
-}
-
-/**
- * @brief Bottom half of the device driver to process available bytes in the tx
- * fifo buffer. There are two waits in the work function. First wait is for the
- * bytes to send, and the second wait is for the timer to be ready to send the
- * next bytes. In both waits, it also checks if the device is closing. When the
- * device is closing, it does not self-requeue.
- *
- * TODO: is work function not needed? can we just directly start hrtimer in write? (start if not active as starting removes the timer). As kfifo_in increments in after inserting, timer function does not need to worry about partial insert.
- * 
- * @param work Pointer to the work structure
- */
-static void tx_work_func(struct work_struct * work)
-{
-    int err;
-    struct drvdata * dd = container_of(work, struct drvdata, tx_work);
-
-    /* Sleep until there is something in tx_fifo or the device is closing */
-    err = wait_event_interruptible(dd->tx_work_waitqueue, dd->closing || !kfifo_is_empty(&dd->tx_fifo));
-    if (err < 0 || dd->closing) {
-        /* If interrupted or device is closing, stop the work */
-        return;
-    }
-
-    /* Sleep until the hrtimer is ready to send or the device is closing */
-    err = wait_event_interruptible(dd->tx_work_waitqueue, dd->closing || !hrtimer_active(&dd->tx_timer));
-    if (err < 0 || dd->closing) {
-        return;
-    }
-
-    hrtimer_start(&dd->tx_timer, dd->delay, HRTIMER_MODE_REL);
-
-    /* Sleep until the hrtimer has sent one or more bytes */
-    err = wait_event_interruptible(dd->tx_work_waitqueue, dd->closing || !hrtimer_active(&dd->tx_timer));
-    if (err < 0 || dd->closing) {
-        return;
-    }
-
-    /* Wake up writer_waitq in case it was waiting for space in fifo */
-    wake_up_interruptible(&dd->writer_waitq);
-
-    /* Self-requeueing work */
-    queue_work(dd->workqueue, &dd->tx_work);
-    return;
 }
 
 /**
@@ -277,10 +220,10 @@ static enum hrtimer_restart tx_timer_callback(struct hrtimer * timer)
 
     /* Start bit */
     if (bit == -1) {
-        /* If nothing was retrieved, wake up the work func for more. */
+        /* If nothing was retrieved, wake up the writer_waitq for more. */
         /* Since there is only 1 actual device to write to, no locks here */
         if (kfifo_get(&dd->tx_fifo, &byte) == 0) {
-            wake_up_interruptible(&dd->tx_work_waitqueue);
+            wake_up_interruptible(&dd->writer_waitq);
             return HRTIMER_NORESTART;
         }
 
@@ -373,24 +316,9 @@ static int dt_probe(struct platform_device *pdev)
     gpiod_set_value(dd->tx_gpio, 1); /* Set as stop bit */
 
     /* Initialize various wait queues and fifo mutexes */
-    init_waitqueue_head(&dd->tx_work_waitqueue);
     init_waitqueue_head(&dd->writer_waitq);
     mutex_init(&dd->tx_fifo_mutex);
     // TODO: rx_fifo_mutex
-
-    /* Create workqueue for the device to handle writing bytes */
-    // TODO: workqueue for reading bytes
-    dd->workqueue = alloc_ordered_workqueue(DEVICE_WORKQUEUE, 0);
-    if (!dd->workqueue) {
-        pr_err(DEVICE_NAME ": alloc_ordered_workqueue(tx) failed\n");
-        ret = -ENOMEM; /* However, there are multiple reasons to fail */
-        goto DT_PROBE_ALLOC_WQ_TX;
-    }
-
-    /* As the device is ready, queue work to start handling data if available */
-    dd->closing = false;
-    INIT_WORK(&dd->tx_work, tx_work_func);
-    queue_work(dd->workqueue, &dd->tx_work);
 
     /* Initialize the high resolution timer for TX */
     hrtimer_init(&dd->tx_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
@@ -426,15 +354,9 @@ static int dt_probe(struct platform_device *pdev)
 
 DT_PROBE_MISC_REG:
 DT_PROBE_REQUEST_IRQ:
-    hrtimer_cancel(&dd->tx_timer);
     dd->closing = true;
     wake_up_interruptible(&dd->writer_waitq);
-    wake_up_interruptible(&dd->tx_work_waitqueue);
-    misc_deregister(&dd->miscdev);
-    cancel_work_sync(&dd->tx_work);
-    flush_workqueue(dd->workqueue);
-    destroy_workqueue(dd->workqueue);
-DT_PROBE_ALLOC_WQ_TX:
+    hrtimer_cancel(&dd->tx_timer);
     mutex_destroy(&dd->tx_fifo_mutex);
 DT_PROBE_GPIOD_GET_TX:
     kfifo_free(&dd->tx_fifo);
@@ -455,21 +377,13 @@ static int dt_remove(struct platform_device *pdev)
         return -ENODATA;
     }
 
-    /* Unregister misc device */
+    /* Unregister misc device to stop new incoming bytes */
     misc_deregister(&dd->miscdev);
 
-    /* Stop the bit-bang tx timer */
-    hrtimer_cancel(&dd->tx_timer);
-
-    /* Mark as closing so new work will not be added. */
+    /* Mark as closing and stop writers and tx hrtimer */
     dd->closing = true;
     wake_up_interruptible(&dd->writer_waitq);
-    wake_up_interruptible(&dd->tx_work_waitqueue);
-
-    /* Cancel the remaining work, and wait for any remaining work */
-    cancel_work_sync(&dd->tx_work);
-    flush_workqueue(dd->workqueue); /* Just in case */
-    destroy_workqueue(dd->workqueue);
+    hrtimer_cancel(&dd->tx_timer);
 
     /* Cleanup driver data */
     mutex_destroy(&dd->tx_fifo_mutex);
