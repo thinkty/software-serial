@@ -4,7 +4,6 @@
  * 
  */
 
-#include "linux/irqreturn.h"
 #include <linux/device.h>
 #include <linux/err.h>
 #include <linux/fs.h>
@@ -47,12 +46,15 @@
  * @param tx_fifo_mutex Mutex for the transmit buffer
  * @param writer_waitq Queue for writers when tx buffer is full
  *
- * @param rx_irq IRQ number for getting the interrupts of RX line 
+ * @param rx_fifo Circular buffer for storing byte(s) received
+ * @param rx_fifo_mutex Mutex for the receival buffer
+ * @param reader_waitq Queue for readers when rx buffer is empty 
  *
  * @param closing Flag to stop work from self-queueing to workqueue
  * @param miscdev Used for getting drvdata using container_of
- * @param tx_gpio GPIO descriptor for transmission
+ * @param rx_irq IRQ number for getting the interrupts of RX line
  * @param rx_gpio GPIO descriptor for receival
+ * @param tx_gpio GPIO descriptor for transmission
  * @param tx_timer High resolution timer to handle bit-banging
  * @param delay Nanoseconds before sending the next "bit" (computed by baudrate)
  */
@@ -64,26 +66,30 @@ struct drvdata {
     struct mutex tx_fifo_mutex;
     wait_queue_head_t writer_waitq;
 
-    int rx_irq;
+    struct kfifo rx_fifo;
+    struct mutex rx_fifo_mutex;
+    wait_queue_head_t reader_waitq;
 
     bool closing;
     struct miscdevice miscdev;
-    struct gpio_desc * tx_gpio;
+    int rx_irq;
     struct gpio_desc * rx_gpio;
+    struct gpio_desc * tx_gpio;
     struct hrtimer tx_timer;
     ktime_t delay;
 };
 
-static int baudrate = 38400;
+static int baudrate = 9600; /* Lower the baudrate, more reliable */
 module_param(baudrate, int, 0);
-MODULE_PARM_DESC(baudrate, "\tBaudrate of the device (default=38400)");
+MODULE_PARM_DESC(baudrate, "\tBaudrate of the device (default=9600)");
 
 /**
  * Function prototypes for file operations
  */
+static int open(struct inode * inode, struct file * filp);
 static int release(struct inode * inode, struct file * filp);
 static ssize_t write(struct file * filp, const char __user * buf, size_t count, loff_t * f_pos);
-// TODO:
+static ssize_t read(struct file * filp, char __user * buf, size_t count, loff_t * f_pos);
 
 /**
  * File operations given as function pointers. .open is handled by default and
@@ -91,9 +97,9 @@ static ssize_t write(struct file * filp, const char __user * buf, size_t count, 
  */
 static struct file_operations fops = {
     .owner = THIS_MODULE,
-    // TODO: open : request irq if not already done. keep count of open so that irq can be released in last release
-    .release = release, // TODO: release irq if last device (using count of open)
-    // TODO: read
+    .open = open,
+    .release = release,
+    .read = read,
     .write = write,
 };
 
@@ -110,7 +116,19 @@ static inline struct drvdata * get_drvdata(struct file * filp)
     return container_of(dev, struct drvdata, miscdev);
 }
 
-// TODO: open
+/**
+ * @brief TODO:
+ *
+ * @param inode Pointer to the file containing device metadata
+ * @param filp Pointer to the open file for the device
+ *
+ * @returns 0 on successful IRQ request.
+ */
+static int open(struct inode * inode, struct file * filp)
+{
+    // TODO: request irq if not already done. keep count of open so that irq can be released in last release
+    return 0;
+}
 
 /**
  * @brief Release is called when the device file descriptor is closed. However,
@@ -124,6 +142,8 @@ static inline struct drvdata * get_drvdata(struct file * filp)
 static int release(struct inode * inode, struct file * filp)
 {
 	unsigned int mn = iminor(inode);
+
+    // TODO: release irq if last device (using count of open)
 
     pr_info(DEVICE_NAME ": released %s%u\n", DEVICE_NAME, mn);
     return 0;
@@ -174,6 +194,9 @@ static ssize_t write(struct file * filp, const char __user * buf, size_t count, 
         err = wait_event_interruptible_hrtimeout(dd->writer_waitq, dd->closing || !kfifo_is_full(&dd->tx_fifo), ms_to_ktime(DEVICE_TIMEOUT));
         if (err < 0) {
             return err;
+        }
+        if (dd->closing) {
+            return -ECANCELED;
         }
 
         err = mutex_lock_interruptible(&dd->tx_fifo_mutex);
@@ -247,7 +270,12 @@ static enum hrtimer_restart tx_timer_callback(struct hrtimer * timer)
     return HRTIMER_RESTART;
 }
 
-// TODO: read
+static ssize_t read(struct file * filp, char __user * buf, size_t count, loff_t * f_pos)
+{
+    // TODO: read
+
+    return 0;
+}
 
 /**
  * @brief Interrupt service routine for the RX line interrupts. TODO:
@@ -292,21 +320,25 @@ static int dt_probe(struct platform_device *pdev)
     }
     dev_set_drvdata(&pdev->dev, dd);
 
-    /* TODO: Allocate tx & rx fifos */
+    /* Allocate tx & rx fifos */
+    ret = kfifo_alloc(&dd->rx_fifo, DEVICE_FIFO_SIZE, GFP_KERNEL);
+    if (ret != 0) {
+        pr_err(DEVICE_NAME ": kfifo_alloc(rx_fifo) failed\n");
+        goto DT_PROBE_RX_KFIFO_ALLOC;
+    }
     ret = kfifo_alloc(&dd->tx_fifo, DEVICE_FIFO_SIZE, GFP_KERNEL);
     if (ret != 0) {
-        pr_err(DEVICE_NAME ": kfifo_alloc() failed\n");
-        goto DT_PROBE_KFIFO_ALLOC;
+        pr_err(DEVICE_NAME ": kfifo_alloc(tx_fifo) failed\n");
+        goto DT_PROBE_TX_KFIFO_ALLOC;
     }
 
     /* Get the GPIO descriptors from the pin numbers */
-    // TODO: rx as well
-    // dd->rx = devm_gpiod_get_index(&pdev->dev, "serial", 1, GPIOD_IN);
-    // if (IS_ERR(dd->rx)) {
-    //     err = PTR_ERR(dd->rx);
-    //     pr_err(DEVICE_NAME ": devm_gpiod_get(rx) failed\n");
-    //     goto DT_PROBE_GPIOD_GET_RX;
-    // }
+    dd->rx_gpio = devm_gpiod_get_index(&pdev->dev, "serial", 1, GPIOD_IN);
+    if (IS_ERR(dd->rx_gpio)) {
+        ret = PTR_ERR(dd->rx_gpio);
+        pr_err(DEVICE_NAME ": devm_gpiod_get(rx) failed\n");
+        goto DT_PROBE_GPIOD_GET_RX;
+    }
     dd->tx_gpio = devm_gpiod_get_index(&pdev->dev, "serial", 0, GPIOD_OUT_HIGH);
     if (IS_ERR(dd->tx_gpio)) {
         ret = PTR_ERR(dd->tx_gpio);
@@ -316,9 +348,10 @@ static int dt_probe(struct platform_device *pdev)
     gpiod_set_value(dd->tx_gpio, 1); /* Set as stop bit */
 
     /* Initialize various wait queues and fifo mutexes */
+    init_waitqueue_head(&dd->reader_waitq);
+    mutex_init(&dd->rx_fifo_mutex);
     init_waitqueue_head(&dd->writer_waitq);
     mutex_init(&dd->tx_fifo_mutex);
-    // TODO: rx_fifo_mutex
 
     /* Initialize the high resolution timer for TX */
     hrtimer_init(&dd->tx_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
@@ -349,18 +382,23 @@ static int dt_probe(struct platform_device *pdev)
         goto DT_PROBE_MISC_REG;
     }
 
-    pr_info(DEVICE_NAME ": successful init with baudrate=%d", baudrate);
+    pr_info(DEVICE_NAME ": successful init with baudrate=%d\n", baudrate);
     return 0;
 
 DT_PROBE_MISC_REG:
 DT_PROBE_REQUEST_IRQ:
     dd->closing = true;
-    wake_up_interruptible(&dd->writer_waitq);
+    wake_up_interruptible_all(&dd->reader_waitq);
+    wake_up_interruptible_all(&dd->writer_waitq);
     hrtimer_cancel(&dd->tx_timer);
+    mutex_destroy(&dd->rx_fifo_mutex);
     mutex_destroy(&dd->tx_fifo_mutex);
 DT_PROBE_GPIOD_GET_TX:
+DT_PROBE_GPIOD_GET_RX:
     kfifo_free(&dd->tx_fifo);
-DT_PROBE_KFIFO_ALLOC:
+DT_PROBE_TX_KFIFO_ALLOC:
+    kfifo_free(&dd->rx_fifo);
+DT_PROBE_RX_KFIFO_ALLOC:
     return ret;
 }
 
@@ -380,13 +418,16 @@ static int dt_remove(struct platform_device *pdev)
     /* Unregister misc device to stop new incoming bytes */
     misc_deregister(&dd->miscdev);
 
-    /* Mark as closing and stop writers and tx hrtimer */
+    /* Mark as closing and stop readers, writers and tx hrtimer */
     dd->closing = true;
-    wake_up_interruptible(&dd->writer_waitq);
+    wake_up_interruptible_all(&dd->reader_waitq);
+    wake_up_interruptible_all(&dd->writer_waitq);
     hrtimer_cancel(&dd->tx_timer);
 
     /* Cleanup driver data */
+    mutex_destroy(&dd->rx_fifo_mutex);
     mutex_destroy(&dd->tx_fifo_mutex);
+    kfifo_free(&dd->rx_fifo);
     kfifo_free(&dd->tx_fifo);
 
     pr_info(DEVICE_NAME ": exit\n");
