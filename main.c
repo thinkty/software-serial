@@ -273,7 +273,6 @@ static irqreturn_t rx_isr(int irq, void * data)
 {
     struct platform_device * pdev = (struct platform_device *) data;
     struct drvdata * dd = (struct drvdata *) dev_get_drvdata(&pdev->dev);
-    pr_info(DEVICE_NAME ": interrupted on irq=%d (saved irq=%d)\n", irq,  dd->rx_irq);
 
     /* If the rx_timer is not running, start it to read in a new byte */
     if (!hrtimer_active(&dd->rx_timer)) {
