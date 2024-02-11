@@ -1,0 +1,41 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "brcm,bcm2837";
+
+    /* See https://www.kernel.org/doc/Documentation/devicetree/bindings/pinctrl/brcm,bcm2835-gpio.txt */
+
+    /* Pin configuration fragment for soft_serial */
+    fragment@0 {
+        target = <&gpio>;
+        __overlay__ {
+            soft_serial_pins: soft_serial_pins {
+                brcm,pins = <27>, <17>;    /* Required. GPIO 27, 17 */
+                brcm,function = <1>, <0>;  /* Required. GPIO 27 = out, 17 = in */
+            };
+        };
+    };
+
+    /* See https://www.kernel.org/doc/Documentation/devicetree/bindings/pinctrl/pinctrl-bindings.txt */
+    /* See https://www.kernel.org/doc/Documentation/devicetree/bindings/gpio/gpio.txt */
+    /* See https://www.kernel.org/doc/Documentation/devicetree/bindings/pinctrl/brcm,bcm2835-gpio.txt (interrupts) */
+
+    /* Device to use the GPIO pin */
+    fragment@1 {
+        target-path = "/";
+        __overlay__ {
+            soft_serial: soft_serial {
+                compatible = "thinkty,soft_serial";
+                status = "okay";
+                exists;
+                pinctrl-names = "default";         /* Pin reserve */
+                pinctrl-0 = <&soft_serial_pins>;   /* Required. Point to a pin configuration in pin controller */
+                serial-gpios = <&gpio 27 0>,       /* Pin 27 for TX */
+                               <&gpio 17 1>;       /* Pin 17 for RX */
+                interrupt-parent = <&gpio>;
+                interrupts = <17 0x2>;             /* Listen for falling edge interrupts on pin 17 */
+            };
+        };
+    };
+};

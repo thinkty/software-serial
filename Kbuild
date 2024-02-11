@@ -1,4 +1,4 @@
-MODULE := soft-serial
+MODULE := soft_serial
 OBJECTS := main.o
 
 obj-m += $(MODULE).o
