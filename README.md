@@ -59,5 +59,18 @@ To remove (uninstall) the kernel module, run :
 rmmod soft_serial
 ```
 
+## Usage
+
+As it is a kernel module, you can use applications like `cat` and `echo` to read and write data to the device.
+For example:
+
+```
+# Read
+cat /dev/soft_serial
+
+# Write
+echo -ne "Hello World\r\n" >> /dev/soft_serial
+```
+
 ## License
 GPL
