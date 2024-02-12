@@ -248,11 +248,56 @@ static enum hrtimer_restart tx_timer_callback(struct hrtimer * timer)
     return HRTIMER_RESTART;
 }
 
+/**
+ * @brief Read from the device buffer (fifo). Since it doesn't make sense to
+ * have multiple readers on a single device, the function assumes there is only
+ * one reader. If the buffer is empty, the read operation blocks until a wake up
+ * is received. If the user specified non-blocking, it will return as soon as it
+ * is blocked.
+ * 
+ * @param filp Pointer to the open file for the device
+ * @param buf User-space buffer
+ * @param count Number of bytes to read
+ * @param f_pos Not used
+ * 
+ * @returns Number of bytes successfully read or a negative errno value.
+ */
 static ssize_t read(struct file * filp, char __user * buf, size_t count, loff_t * f_pos)
 {
-    // TODO: read
+    int to_copy = count < DEVICE_FIFO_SIZE ? count : DEVICE_FIFO_SIZE;
+    int err = 0;
+    struct drvdata * dd = get_drvdata(filp);
 
-    return 0;
+    if (kfifo_is_empty(&dd->rx_fifo)) {
+
+        /* If non-blocking, return immediately */
+        if (filp->f_flags & O_NDELAY || filp->f_flags & O_NONBLOCK) {
+            return -EAGAIN;
+        }
+
+        /* Sleep until new byte(s) available, closing device, interrupt, or timeout */
+        err = wait_event_interruptible_hrtimeout(dd->reader_waitq, dd->closing || !kfifo_is_empty(&dd->rx_fifo), ms_to_ktime(DEVICE_TIMEOUT));
+        if (err < 0) {
+            return err;
+        }
+        if (dd->closing) {
+            return -ECANCELED;
+        }
+    }
+
+    /* If closing device, return */
+    if (dd->closing) {
+        return -ECANCELED;
+    }
+
+    /* Depending on the buffer vacancy, it might write less than specified */
+    err = kfifo_to_user(&dd->rx_fifo, buf, to_copy, &to_copy);
+    if (err < 0) {
+        pr_err(DEVICE_NAME ": kfifo_to_user() failed, bad address\n");
+        return err;
+    }
+
+    return to_copy;
 }
 
 /**
@@ -312,11 +357,11 @@ static enum hrtimer_restart rx_timer_callback(struct hrtimer * timer)
         if (kfifo_put(&dd->rx_fifo, byte) == 0) {
             pr_err(DEVICE_NAME ": kfifo_put() says fifo is full although it shouldn't be\n");
         }
-
-        pr_info(DEVICE_NAME ": read in %c\n", byte); // TODO:
-
         bit = 0;
         byte = 0;
+
+        /* Wake up any readers waiting */
+        wake_up_interruptible(&dd->reader_waitq);
         return HRTIMER_NORESTART;
     }
 
