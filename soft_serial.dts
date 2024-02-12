@@ -32,7 +32,7 @@
                 pinctrl-names = "default";         /* Pin reserve */
                 pinctrl-0 = <&soft_serial_pins>;   /* Required. Point to a pin configuration in pin controller */
                 serial-gpios = <&gpio 27 0>,       /* Pin 27 for TX */
-                               <&gpio 17 1>;       /* Pin 17 for RX */
+                               <&gpio 17 0>;       /* Pin 17 for RX */
                 interrupt-parent = <&gpio>;
                 interrupts = <17 0x2>;             /* Listen for falling edge interrupts on pin 17 */
             };
