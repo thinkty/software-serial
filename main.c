@@ -276,7 +276,8 @@ static ssize_t read(struct file * filp, char __user * buf, size_t count, loff_t 
         }
 
         /* Sleep until new byte(s) available, closing device, interrupt, or timeout */
-        err = wait_event_interruptible_hrtimeout(dd->reader_waitq, dd->closing || !kfifo_is_empty(&dd->rx_fifo), ms_to_ktime(DEVICE_TIMEOUT));
+        // err = wait_event_interruptible_hrtimeout(dd->reader_waitq, dd->closing || !kfifo_is_empty(&dd->rx_fifo), ms_to_ktime(DEVICE_TIMEOUT));
+        err = wait_event_interruptible(dd->reader_waitq, dd->closing || !kfifo_is_empty(&dd->rx_fifo));
         if (err < 0) {
             return err;
         }
